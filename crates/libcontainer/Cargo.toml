@@ -1,15 +1,18 @@
 [package]
-name = "libcontainer"
-version = "0.6.0" # MARK: Version
-description = "Library for container control"
+name = "zlayer-libcontainer"
+version = "0.6.1-zlayer.1" # MARK: Version
+description = "Library for container control — ZLayer fork carrying open upstream PRs; see https://github.com/ZachHandley/youki"
 license = "Apache-2.0"
-repository = "https://github.com/youki-dev/youki"
+repository = "https://github.com/ZachHandley/youki"
 homepage = "https://youki-dev.github.io/youki/"
 readme = "README.md"
 authors = ["youki team"]
 edition = "2024"
 rust-version = "1.85.0"
 keywords = ["youki", "container", "cgroups"]
+
+[lib]
+name = "libcontainer"
 
 [features]
 default = ["systemd", "v2", "v1", "libseccomp"]
@@ -28,7 +31,7 @@ nix = { workspace = true, features = ["socket", "sched", "mount", "mman", "resou
 oci-spec = { version = "0.9.0", features = ["runtime"] }
 procfs = { workspace = true }
 prctl = { workspace = true }
-libcgroups = { path = "../libcgroups", default-features = false, version = "0.6.0" } # MARK: Version
+libcgroups = { package = "zlayer-libcgroups", path = "../libcgroups", default-features = false, version = "0.6.1-zlayer.1" } # MARK: Version
 libseccomp = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

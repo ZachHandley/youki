@@ -1,0 +1,187 @@
+name: Publish ZLayer fork to crates.io
+
+on:
+  push:
+    branches: [zlayer-patches]
+    paths:
+      - 'crates/libcgroups/**'
+      - 'crates/libcontainer/**'
+      - '.github/workflows/publish-zlayer-fork.yml'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Republish even if HEAD already has a published/* tag'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-zlayer-fork
+  cancel-in-progress: false
+
+env:
+  BASE_VERSION: "0.6.1"
+  ZLAYER_PREFIX: "zlayer"
+
+jobs:
+  publish:
+    name: Bump and publish renamed fork crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout zlayer-patches
+        uses: actions/checkout@v4
+        with:
+          ref: zlayer-patches
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'zlayer-publish-bot'
+          git config user.email 'zlayer-publish-bot@users.noreply.github.com'
+
+      - name: Skip if HEAD already has a published tag
+        id: tag_check
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          EXISTING=$(git tag --points-at HEAD --list 'published/zlayer-libcontainer-*' || true)
+          FORCE='${{ github.event.inputs.force }}'
+          if [ -n "$EXISTING" ] && [ "$FORCE" != "true" ]; then
+            echo "HEAD ($HEAD_SHA) already published as: $EXISTING"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute next -zlayer.N suffix
+        if: steps.tag_check.outputs.skip != 'true'
+        id: version
+        run: |
+          set -euo pipefail
+          BASE="${BASE_VERSION}-${ZLAYER_PREFIX}"
+          UA='User-Agent: zlayer-publish-bot (github.com/ZachHandley/youki)'
+
+          fetch_max() {
+            local crate="$1"
+            local resp
+            resp=$(curl -sS -H "$UA" "https://crates.io/api/v1/crates/$crate" || echo '{}')
+            echo "$resp" | jq -r --arg base "$BASE" '
+              (.versions // [])
+              | map(.num)
+              | map(select(test("^" + ($base | gsub("\\."; "\\.")) + "\\.([0-9]+)$")))
+              | map(capture("\\.(?<n>[0-9]+)$") | .n | tonumber)
+              | (max // 0)
+            '
+          }
+
+          MAX_CG=$(fetch_max "zlayer-libcgroups")
+          MAX_LC=$(fetch_max "zlayer-libcontainer")
+          MAX=$(( MAX_CG > MAX_LC ? MAX_CG : MAX_LC ))
+          NEXT=$(( MAX + 1 ))
+          NEW_VERSION="${BASE}.${NEXT}"
+          echo "Current max -zlayer.N: libcgroups=$MAX_CG libcontainer=$MAX_LC"
+          echo "Next version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Apply version edits to manifests
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          NEW_VERSION='${{ steps.version.outputs.new_version }}'
+          BASE="${BASE_VERSION}-${ZLAYER_PREFIX}"
+          ESC_BASE=$(printf '%s' "$BASE" | sed 's/[.[\*^$(){}+?|]/\\&/g')
+
+          sed -i -E "s/^version = \"${ESC_BASE}\.[0-9]+\"/version = \"${NEW_VERSION}\"/" \
+            crates/libcgroups/Cargo.toml \
+            crates/libcontainer/Cargo.toml
+
+          sed -i -E "s/(package = \"zlayer-libcgroups\"[^}]*version = )\"${ESC_BASE}\.[0-9]+\"/\1\"${NEW_VERSION}\"/" \
+            crates/libcontainer/Cargo.toml
+
+          echo '--- libcgroups ---'
+          grep -E '^(name|version) = ' crates/libcgroups/Cargo.toml
+          echo '--- libcontainer ---'
+          grep -E '^(name|version) = ' crates/libcontainer/Cargo.toml
+          grep 'package = "zlayer-libcgroups"' crates/libcontainer/Cargo.toml
+
+      - name: Install Rust toolchain
+        if: steps.tag_check.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system build deps
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libseccomp-dev pkg-config
+
+      - name: Publish zlayer-libcgroups
+        if: steps.tag_check.outputs.skip != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        working-directory: crates/libcgroups
+        run: cargo publish --allow-dirty
+
+      - name: Wait for crates.io index propagation
+        if: steps.tag_check.outputs.skip != 'true'
+        run: sleep 45
+
+      - name: Publish zlayer-libcontainer
+        if: steps.tag_check.outputs.skip != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        working-directory: crates/libcontainer
+        run: |
+          set -euo pipefail
+          if ! cargo publish --allow-dirty; then
+            echo 'First publish attempt failed; sleeping 30s and retrying for index propagation...'
+            sleep 30
+            cargo publish --allow-dirty
+          fi
+
+      - name: Tag fork at HEAD
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          NEW_VERSION='${{ steps.version.outputs.new_version }}'
+          HEAD_SHA='${{ steps.tag_check.outputs.head_sha }}'
+          TAG_CG="published/zlayer-libcgroups-${NEW_VERSION}"
+          TAG_LC="published/zlayer-libcontainer-${NEW_VERSION}"
+          git tag -f "$TAG_CG" "$HEAD_SHA"
+          git tag -f "$TAG_LC" "$HEAD_SHA"
+          git push origin --force-with-lease=refs/tags/"$TAG_CG" "$TAG_CG"
+          git push origin --force-with-lease=refs/tags/"$TAG_LC" "$TAG_LC"
+
+      - name: Workflow summary
+        if: steps.tag_check.outputs.skip != 'true'
+        run: |
+          NEW_VERSION='${{ steps.version.outputs.new_version }}'
+          HEAD_SHA='${{ steps.tag_check.outputs.head_sha }}'
+          {
+            echo "## Published ZLayer fork crates"
+            echo ""
+            echo "- **Version:** \`${NEW_VERSION}\`"
+            echo "- **Fork SHA:** \`${HEAD_SHA}\`"
+            echo "- [zlayer-libcgroups on crates.io](https://crates.io/crates/zlayer-libcgroups/${NEW_VERSION})"
+            echo "- [zlayer-libcontainer on crates.io](https://crates.io/crates/zlayer-libcontainer/${NEW_VERSION})"
+            echo ""
+            echo "Bump consumer Cargo.lock with:"
+            echo '```bash'
+            echo 'cargo update -p zlayer-libcgroups -p zlayer-libcontainer'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip summary
+        if: steps.tag_check.outputs.skip == 'true'
+        run: |
+          HEAD_SHA='${{ steps.tag_check.outputs.head_sha }}'
+          {
+            echo "## Skipped publish"
+            echo ""
+            echo "HEAD \`${HEAD_SHA}\` already has a \`published/*\` tag. Trigger manually with \`force: true\` to republish."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,9 +1,9 @@
 [package]
-name = "libcgroups"
-version = "0.6.0" # MARK: Version
-description = "Library for cgroup"
+name = "zlayer-libcgroups"
+version = "0.6.1-zlayer.1" # MARK: Version
+description = "Library for cgroup — ZLayer fork carrying open upstream PRs; see https://github.com/ZachHandley/youki"
 license = "Apache-2.0"
-repository = "https://github.com/youki-dev/youki"
+repository = "https://github.com/ZachHandley/youki"
 homepage = "https://youki-dev.github.io/youki/"
 readme = "README.md"
 authors = ["youki team"]
@@ -11,6 +11,9 @@ edition = "2024"
 rust-version = "1.85.0"
 autoexamples = true
 keywords = ["youki", "container", "cgroups"]
+
+[lib]
+name = "libcgroups"
 
 [features]
 default = ["v1", "v2", "systemd"]
