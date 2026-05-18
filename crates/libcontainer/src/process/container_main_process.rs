@@ -283,9 +283,16 @@ pub fn container_main_process(container_args: &ContainerArgs) -> Result<(Pid, bo
 
 fn setup_mapping(config: &UserNamespaceConfig, pid: Pid) -> Result<()> {
     tracing::debug!("write mapping for pid {:?}", pid);
-    if !config.privileged {
-        // The main process is running as an unprivileged user and cannot write the mapping
-        // until "deny" has been written to setgroups. See CVE-2014-8989.
+    // CVE-2014-8989 requires "deny" before a direct write to gid_map from
+    // an unprivileged process. The newuidmap/newgidmap binaries (with
+    // cap_setuid/cap_setgid) handle setgroups themselves, so we must NOT
+    // pre-write "deny" on that path -- once "deny" is set, the kernel
+    // refuses to flip it back to "allow" without CAP_SYS_ADMIN in the
+    // parent userns, and any setgroups() call inside the container fails.
+    if !config.privileged
+        && config.newuidmap.is_none()
+        && config.newgidmap.is_none()
+    {
         std::fs::write(format!("/proc/{pid}/setgroups"), "deny")
             .map_err(ProcessError::SetGroupsDeny)?;
     }

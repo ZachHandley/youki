@@ -723,8 +723,6 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
- "libcgroups",
- "libcontainer",
  "nix 0.29.0",
  "num_cpus",
  "oci-spec",
@@ -742,6 +740,8 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which 8.0.2",
+ "zlayer-libcgroups",
+ "zlayer-libcontainer",
 ]
 
 [[package]]
@@ -2630,66 +2630,6 @@ name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
-
-[[package]]
-name = "libcgroups"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "clap",
- "env_logger",
- "errno",
- "fixedbitset 0.5.7",
- "libbpf-sys",
- "libc",
- "mockall",
- "nix 0.29.0",
- "oci-spec",
- "pathrs",
- "procfs",
- "quickcheck",
- "rbpf",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "libcontainer"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "caps",
- "chrono",
- "fastrand",
- "libc",
- "libcgroups",
- "libseccomp",
- "nc",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-sys",
- "nix 0.29.0",
- "oci-spec",
- "pathrs",
- "prctl",
- "procfs",
- "quickcheck",
- "rand 0.10.1",
- "regex",
- "rust-criu",
- "safe-path",
- "scopeguard",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
 
 [[package]]
 name = "libloading"
@@ -7389,8 +7329,6 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
- "libcgroups",
- "libcontainer",
  "liboci-cli",
  "nix 0.29.0",
  "oci-spec",
@@ -7412,6 +7350,8 @@ dependencies = [
  "wasmer",
  "wasmer-wasix",
  "wasmtime",
+ "zlayer-libcgroups",
+ "zlayer-libcontainer",
 ]
 
 [[package]]
@@ -7492,6 +7432,66 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "zlayer-libcgroups"
+version = "0.6.1-zlayer.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "errno",
+ "fixedbitset 0.5.7",
+ "libbpf-sys",
+ "libc",
+ "mockall",
+ "nix 0.29.0",
+ "oci-spec",
+ "pathrs",
+ "procfs",
+ "quickcheck",
+ "rbpf",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "zlayer-libcontainer"
+version = "0.6.1-zlayer.1"
+dependencies = [
+ "anyhow",
+ "caps",
+ "chrono",
+ "fastrand",
+ "libc",
+ "libseccomp",
+ "nc",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-sys",
+ "nix 0.29.0",
+ "oci-spec",
+ "pathrs",
+ "prctl",
+ "procfs",
+ "quickcheck",
+ "rand 0.10.1",
+ "regex",
+ "rust-criu",
+ "safe-path",
+ "scopeguard",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "zlayer-libcgroups",
 ]
 
 [[package]]

@@ -374,7 +374,8 @@ pub fn lookup_map_binaries(
     spec: &Linux,
 ) -> std::result::Result<Option<(PathBuf, PathBuf)>, MappingError> {
     if let Some(uid_mappings) = spec.uid_mappings() {
-        if uid_mappings.len() == 1 && uid_mappings.len() == 1 {
+        let gid_len = spec.gid_mappings().as_ref().map(|g| g.len()).unwrap_or(0);
+        if uid_mappings.len() == 1 && gid_len == 1 {
             return Ok(None);
         }
 
