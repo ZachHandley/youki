@@ -289,10 +289,7 @@ fn setup_mapping(config: &UserNamespaceConfig, pid: Pid) -> Result<()> {
     // pre-write "deny" on that path -- once "deny" is set, the kernel
     // refuses to flip it back to "allow" without CAP_SYS_ADMIN in the
     // parent userns, and any setgroups() call inside the container fails.
-    if !config.privileged
-        && config.newuidmap.is_none()
-        && config.newgidmap.is_none()
-    {
+    if !config.privileged && config.newuidmap.is_none() && config.newgidmap.is_none() {
         std::fs::write(format!("/proc/{pid}/setgroups"), "deny")
             .map_err(ProcessError::SetGroupsDeny)?;
     }
