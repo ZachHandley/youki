@@ -7436,7 +7436,7 @@ dependencies = [
 
 [[package]]
 name = "zlayer-libcgroups"
-version = "0.6.1-zlayer.1"
+version = "0.6.1-zlayer.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -7462,7 +7462,7 @@ dependencies = [
 
 [[package]]
 name = "zlayer-libcontainer"
-version = "0.6.1-zlayer.1"
+version = "0.6.1-zlayer.5"
 dependencies = [
  "anyhow",
  "caps",

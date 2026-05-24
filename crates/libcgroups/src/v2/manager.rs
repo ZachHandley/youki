@@ -103,11 +103,14 @@ impl Manager {
         // Note: we intentionally do NOT write controllers to `self.root_path` here.
         // In nested scenarios (running inside a container where the host's root
         // cgroup is owned by host systemd), writing to the root's
-        // `cgroup.subtree_control` fails with EROFS because the file is on a
-        // read-only view from our PoV. Any ancestor up to root must already
-        // have the relevant controllers enabled — otherwise our process could
-        // not be executing inside that cgroup hierarchy in the first place. We
-        // only enable controllers on path components we ourselves create.
+        // `cgroup.subtree_control` fails because the file is on a read-only
+        // view from our PoV or owned by another manager. Any ancestor up to
+        // root must already have the relevant controllers enabled — otherwise
+        // our process could not be executing inside that cgroup hierarchy in
+        // the first place. We only enable controllers on path components we
+        // ourselves create; for path components that pre-existed our process
+        // we tolerate per-controller write failures via
+        // `is_subtree_control_per_controller_failure`.
 
         let mut current_path = self.root_path.clone();
         let mut components = self
@@ -131,33 +134,16 @@ impl Manager {
             // last component cannot have subtree_control enabled due to internal process constraint
             // if this were set, writing to the cgroups.procs file will fail with Erno 16 (device or resource busy)
             if components.peek().is_some() {
-                match Self::write_controllers(&current_path, &controllers) {
-                    Ok(()) => {}
-                    Err(e) if !we_created && Self::is_inherited_ancestor_unwritable(&e) => {
-                        // Pre-existing ancestor owned by a parent cgroup
-                        // manager (e.g. host systemd, the outer container's
-                        // runtime). The write can fail in two distinct ways
-                        // depending on how that ancestor is exposed:
-                        //   * EROFS  — nested in a container whose cgroupfs
-                        //     view is read-only (cgroupns=private, the host's
-                        //     root cgroup is owned by host systemd).
-                        //   * EACCES — running as a regular user under
-                        //     systemd, where the ancestor cgroup directory
-                        //     (e.g. /sys/fs/cgroup/user.slice) is root-owned
-                        //     and its subtree_control file is mode 0644.
-                        // In both cases the ancestor predates this process; if
-                        // its subtree_control genuinely needed updating we
-                        // could not do it anyway, and our PARENT cgroup would
-                        // already have failed if controllers were truly
-                        // missing — because we could not be running in this
-                        // hierarchy in the first place. Skip silently.
-                        tracing::debug!(
-                            path = ?current_path,
-                            "skipping subtree_control write on pre-existing unwritable ancestor",
-                        );
-                    }
-                    Err(e) => return Err(e.into()),
-                }
+                // When `we_created=true`, we own the cgroup and any failure is
+                // a real bug. When `we_created=false`, the cgroup predates us
+                // (host systemd, outer container runtime) and per-controller
+                // failures on its subtree_control are expected and tolerable
+                // — see `is_subtree_control_per_controller_failure` for the
+                // errno set we silently skip. This matches the behavior of
+                // both runc (opencontainers/cgroups fs2/create.go
+                // CreateCgroupPath) and crun (containers/crun
+                // libcrun/cgroup-utils.c enable_controllers).
+                Self::write_controllers(&current_path, &controllers, /*strict=*/ we_created)?;
             }
         }
 
@@ -165,32 +151,72 @@ impl Manager {
         Ok(())
     }
 
-    /// Returns true if the wrapped IO error indicates the target cgroup file
-    /// is owned by a parent cgroup manager that this process cannot modify.
+    /// Returns true if the wrapped IO error indicates that a single
+    /// `+controller` write to a `cgroup.subtree_control` file should be
+    /// silently skipped when the caller does not own the cgroup. Mirrors the
+    /// errno allowlist used by crun's `enable_controllers`
+    /// (containers/crun libcrun/cgroup-utils.c) and the unconditional
+    /// per-controller swallow in runc's `CreateCgroupPath`
+    /// (opencontainers/cgroups fs2/create.go).
     ///
-    /// Two distinct errnos express this condition:
-    ///   * `EROFS`  — the file lives on a read-only view of cgroupfs (typical
-    ///     of `cgroupns=private` containers whose root cgroup is owned by the
-    ///     host).
-    ///   * `EACCES` — the file is writable in principle but its DAC owner is
-    ///     someone else (typical of rootless invocations under systemd where
-    ///     ancestor slices like `user.slice` are root-owned mode 0644).
-    ///
-    /// Callers use this to swallow `cgroup.subtree_control` write failures on
-    /// ancestor cgroup directories that pre-existed our process — controllers
-    /// in those ancestors are already enabled by whatever manager owns them,
-    /// otherwise we could not be running inside this hierarchy at all.
-    fn is_inherited_ancestor_unwritable(err: &WrappedIoError) -> bool {
+    ///   * `EROFS`      — read-only cgroupfs view (`cgroupns=private` inside
+    ///     a container whose root cgroup is host-owned).
+    ///   * `EACCES`     — DAC owner is another user (e.g. root-owned ancestor
+    ///     slice under a rootless user session).
+    ///   * `ENOENT`     — the controller is not present in this cgroup's own
+    ///     `cgroup.controllers` (e.g. systemd did not delegate `hugetlb` to
+    ///     `user@.service`).
+    ///   * `EPERM`      — capability missing (similar to `EACCES`, errno
+    ///     varies by kernel path).
+    ///   * `EOPNOTSUPP` — controller exists but isn't supported in this
+    ///     hierarchy/configuration.
+    ///   * `EBUSY`      — controller is temporarily contended by another
+    ///     manager (transient; the parent manager will resolve).
+    fn is_subtree_control_per_controller_failure(err: &WrappedIoError) -> bool {
         matches!(
             err.inner().raw_os_error().map(Errno::from_raw),
-            Some(Errno::EROFS) | Some(Errno::EACCES)
+            Some(Errno::EROFS)
+                | Some(Errno::EACCES)
+                | Some(Errno::ENOENT)
+                | Some(Errno::EPERM)
+                | Some(Errno::EOPNOTSUPP)
+                | Some(Errno::EBUSY)
         )
     }
 
-    /// Writes a list of controllers to the `{path}/cgroup.subtree_control` file
-    fn write_controllers(path: &Path, controllers: &[String]) -> Result<(), WrappedIoError> {
+    /// Writes a list of controllers to the `{path}/cgroup.subtree_control`
+    /// file, one at a time, so a single unsupported controller doesn't abort
+    /// the whole list.
+    ///
+    /// When `strict=true`, any per-controller failure is returned to the
+    /// caller. When `strict=false`, per-controller failures whose errno is in
+    /// the tolerated set (see
+    /// [`Self::is_subtree_control_per_controller_failure`]) are logged at
+    /// debug level and silently skipped. This matches the behavior of both
+    /// runc (opencontainers/cgroups fs2/create.go `CreateCgroupPath`) and
+    /// crun (containers/crun libcrun/cgroup-utils.c `enable_controllers`):
+    /// the kernel will reject controllers an ancestor cgroup doesn't itself
+    /// have enabled, and trying to enable a controller on a cgroup managed
+    /// by another manager (host systemd, outer container runtime) is normal
+    /// and not an error.
+    fn write_controllers(
+        path: &Path,
+        controllers: &[String],
+        strict: bool,
+    ) -> Result<(), WrappedIoError> {
         for controller in controllers {
-            common::write_cgroup_file_str(path.join(CGROUP_SUBTREE_CONTROL), controller)?;
+            match common::write_cgroup_file_str(path.join(CGROUP_SUBTREE_CONTROL), controller) {
+                Ok(()) => {}
+                Err(e) if !strict && Self::is_subtree_control_per_controller_failure(&e) => {
+                    tracing::debug!(
+                        path = ?path,
+                        controller = %controller,
+                        errno = ?e.inner().raw_os_error(),
+                        "skipping unsupported controller on pre-existing ancestor cgroup",
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(())
@@ -308,34 +334,50 @@ mod tests {
     use crate::test::set_fixture;
     use crate::v2::util::CGROUP_CONTROLLERS;
 
-    /// `is_inherited_ancestor_unwritable` matches both EROFS (nested
-    /// container, read-only cgroupfs view) and EACCES (rootless under
-    /// systemd, ancestor slice owned by root). Other errnos must be rejected
-    /// so we never silently swallow legitimate write failures.
+    /// `is_subtree_control_per_controller_failure` must match the full
+    /// crun-parity errno allowlist (EROFS, EACCES, ENOENT, EPERM,
+    /// EOPNOTSUPP, EBUSY) and must reject every other errno so we never
+    /// silently swallow legitimate write failures.
     #[test]
-    fn is_inherited_ancestor_unwritable_matches_both_errnos() {
-        fn wrap(err: std::io::Error) -> WrappedIoError {
+    fn is_subtree_control_per_controller_failure_matches() {
+        fn wrap(errno: Errno) -> WrappedIoError {
             WrappedIoError::Write {
-                err,
+                err: std::io::Error::from_raw_os_error(errno as i32),
                 path: PathBuf::from("/some/cgroup/cgroup.subtree_control"),
                 data: "+cpu".into(),
             }
         }
 
-        let erofs = std::io::Error::from_raw_os_error(Errno::EROFS as i32);
-        assert!(Manager::is_inherited_ancestor_unwritable(&wrap(erofs)));
+        // Tolerated errnos — all must match.
+        assert!(Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EROFS
+        )));
+        assert!(Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EACCES
+        )));
+        assert!(Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::ENOENT
+        )));
+        assert!(Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EPERM
+        )));
+        assert!(Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EOPNOTSUPP
+        )));
+        assert!(Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EBUSY
+        )));
 
-        let eacces = std::io::Error::from_raw_os_error(Errno::EACCES as i32);
-        assert!(Manager::is_inherited_ancestor_unwritable(&wrap(eacces)));
-
-        let enoent = std::io::Error::from_raw_os_error(Errno::ENOENT as i32);
-        assert!(!Manager::is_inherited_ancestor_unwritable(&wrap(enoent)));
-
-        let ebusy = WrappedIoError::Open {
-            err: std::io::Error::from_raw_os_error(Errno::EBUSY as i32),
-            path: PathBuf::from("/some/cgroup/cgroup.subtree_control"),
-        };
-        assert!(!Manager::is_inherited_ancestor_unwritable(&ebusy));
+        // Untolerated errnos — must NOT match.
+        assert!(!Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::ENOSPC
+        )));
+        assert!(!Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EINVAL
+        )));
+        assert!(!Manager::is_subtree_control_per_controller_failure(&wrap(
+            Errno::EIO
+        )));
     }
 
     /// End-to-end happy-path exercise of `create_unified_cgroup` against a
@@ -391,5 +433,29 @@ mod tests {
         // Sanity: the pid we wrote should be in the procs file.
         let procs = fs::read_to_string(leaf.join(CGROUP_PROCS)).expect("read cgroup.procs");
         assert_eq!(procs.trim(), "0");
+    }
+
+    /// `write_controllers` with `strict=true` (we own the cgroup) must
+    /// propagate any underlying write failure. `strict=false` (pre-existing
+    /// ancestor) must tolerate tolerated errnos. We can't inject specific
+    /// errnos through the tempfile-backed write path easily, but we CAN
+    /// verify the happy path round-trips in both strict modes against a
+    /// writable subtree_control file.
+    #[test]
+    fn write_controllers_happy_path_both_modes() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dir = tmp.path();
+        set_fixture(dir, CGROUP_SUBTREE_CONTROL, "").expect("write subtree_control fixture");
+
+        let controllers = vec!["+cpu".to_string(), "+memory".to_string()];
+
+        // strict=true succeeds against a writable file.
+        Manager::write_controllers(dir, &controllers, /*strict=*/ true)
+            .expect("strict write_controllers succeeds on writable subtree_control");
+
+        // strict=false also succeeds against a writable file (happy path
+        // tolerance does not regress correctness).
+        Manager::write_controllers(dir, &controllers, /*strict=*/ false)
+            .expect("non-strict write_controllers succeeds on writable subtree_control");
     }
 }

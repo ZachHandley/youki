@@ -26,8 +26,8 @@ wasm-wasmtime = ["wasmtime", "wasi-common"]
 clap = { workspace = true, features = ["std", "suggestions", "derive", "cargo", "help", "usage", "error-context"] }
 anyhow = { workspace = true }
 chrono = { workspace = true, features = ["clock", "serde"] }
-libcgroups = { package = "zlayer-libcgroups", path = "../libcgroups", default-features = false, version = "0.6.1-zlayer.1" } # MARK: Version
-libcontainer = { package = "zlayer-libcontainer", path = "../libcontainer", default-features = false, version = "0.6.1-zlayer.1" } # MARK: Version
+libcgroups = { package = "zlayer-libcgroups", path = "../libcgroups", default-features = false, version = "0.6.1-zlayer.5" } # MARK: Version
+libcontainer = { package = "zlayer-libcontainer", path = "../libcontainer", default-features = false, version = "0.6.1-zlayer.5" } # MARK: Version
 liboci-cli = { workspace = true }
 nix = { workspace = true }
 pentacle = { workspace = true }
