@@ -197,11 +197,25 @@ impl State {
     pub fn load(container_root: &Path) -> Result<Self> {
         let state_file_path = Self::file_path(container_root);
         let state_file = File::open(&state_file_path).map_err(|err| {
-            tracing::error!(
-                ?state_file_path,
-                %err,
-                "failed to open container state file",
-            );
+            // A missing state file means the container is already gone (torn
+            // down, or never created). Callers use `load` as an existence
+            // probe and handle the returned error, so ENOENT is EXPECTED —
+            // logging it at ERROR floods the daemon log when a periodic status
+            // poll races a container teardown. Only genuine open failures
+            // (permission denied, I/O error, ...) are real errors.
+            if err.kind() == std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    ?state_file_path,
+                    %err,
+                    "container state file absent (container gone)",
+                );
+            } else {
+                tracing::error!(
+                    ?state_file_path,
+                    %err,
+                    "failed to open container state file",
+                );
+            }
             StateError::OpenStateFile {
                 state_file_path: state_file_path.to_owned(),
                 source: err,
