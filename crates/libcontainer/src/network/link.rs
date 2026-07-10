@@ -114,6 +114,18 @@ impl LinkClient {
         Ok(())
     }
 
+    /// Bring the loopback interface (`lo`) up in the CURRENT network namespace.
+    ///
+    /// The kernel creates `lo` at ifindex 1 in a fresh network namespace but
+    /// leaves it DOWN; runc/crun bring it up so `127.0.0.1`/`localhost` are
+    /// reachable inside the container. The caller must already be inside the
+    /// target network namespace (a local netlink socket operates on it).
+    pub(crate) fn bring_loopback_up(&mut self) -> Result<()> {
+        let lo = self.get_by_name("lo")?;
+        self.set_up(lo.header.index)?;
+        Ok(())
+    }
+
     /// Sets a network interface to the down state.
     ///
     /// # Arguments
@@ -362,6 +374,43 @@ mod tests {
             // Verify the netlink flags
             let expected_flags = NLM_F_REQUEST | NLM_F_ACK;
             assert_eq!(send_calls[0].header.flags, expected_flags);
+        } else {
+            panic!("Expected Fake client");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_bring_loopback_up_sets_lo_up() {
+        let mut fake_client = FakeNetlinkClient::new();
+        // Response 1: get_by_name("lo") -> loopback at ifindex 1.
+        let mut lo = LinkMessage::default();
+        lo.header.index = 1;
+        lo.attributes.push(LinkAttribute::IfName("lo".to_string()));
+        // Response 2: set_up ACK.
+        fake_client.set_expected_responses(vec![
+            RouteNetlinkMessage::NewLink(lo),
+            RouteNetlinkMessage::NewLink(LinkMessage::default()),
+        ]);
+
+        let mut link_client = LinkClient::new(ClientWrapper::Fake(fake_client)).unwrap();
+        link_client
+            .bring_loopback_up()
+            .expect("bring_loopback_up should succeed");
+
+        if let ClientWrapper::Fake(fake_client) = &mut link_client.client {
+            let send_calls = fake_client.get_send_calls();
+            // One GetLink (get_by_name "lo") + one SetLink (set_up).
+            assert_eq!(send_calls.len(), 2);
+            if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::SetLink(link)) =
+                &send_calls[1].payload
+            {
+                assert_eq!(link.header.index, 1, "set_up must target lo's ifindex");
+                assert!(link.header.flags.contains(LinkFlags::Up));
+                assert!(link.header.change_mask.contains(LinkFlags::Up));
+            } else {
+                panic!("Expected a SetLink message as the second netlink send");
+            }
         } else {
             panic!("Expected Fake client");
         }

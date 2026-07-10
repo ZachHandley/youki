@@ -74,6 +74,30 @@ pub fn container_init_process(
 
     apply_rest_namespaces(&ctx.ns, ctx.spec, ctx.syscall.as_ref())?;
 
+    // A container that owns a fresh network namespace starts with its loopback
+    // interface (`lo`) DOWN — the kernel creates it at ifindex 1 but leaves it
+    // down, so 127.0.0.1/localhost are unreachable inside the container until it
+    // is brought up (runc/crun do this too). We are already inside the container
+    // netns here (apply_rest_namespaces entered CLONE_NEWNET), so a local netlink
+    // socket targets the CONTAINER's `lo`. Best-effort: a failure here (e.g.
+    // netlink blocked in a locked-down sandbox) must NEVER abort container
+    // creation. Host-network containers declare no network namespace, so this is
+    // skipped and the host's already-up `lo` is left untouched.
+    if matches!(ctx.ns.get(LinuxNamespaceType::Network), Ok(Some(_))) {
+        match LinkClient::new(create_network_client())
+            .and_then(|mut link_client| link_client.bring_loopback_up())
+        {
+            Ok(()) => {
+                tracing::debug!("brought loopback `lo` up in container network namespace")
+            }
+            Err(err) => tracing::warn!(
+                ?err,
+                "failed to bring up loopback `lo` in container network namespace; \
+                 127.0.0.1/localhost may be unreachable inside the container"
+            ),
+        }
+    }
+
     if let Some(true) = ctx.process.no_new_privileges() {
         let _ = prctl::set_no_new_privileges(true);
     }
