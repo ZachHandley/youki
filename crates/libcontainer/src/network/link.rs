@@ -121,8 +121,14 @@ impl LinkClient {
     /// reachable inside the container. The caller must already be inside the
     /// target network namespace (a local netlink socket operates on it).
     pub(crate) fn bring_loopback_up(&mut self) -> Result<()> {
-        let lo = self.get_by_name("lo")?;
-        self.set_up(lo.header.index)?;
+        // `lo` is ALWAYS ifindex 1 in a fresh network namespace, so bring it up
+        // by index directly. RTM_SETLINK carries NLM_F_ACK (the kernel always
+        // replies), unlike an RTM_GETLINK-by-name lookup which sends no ACK — if
+        // that lookup's reply is lost while ZLayer concurrently attaches the
+        // overlay veth to this netns, its recv blocks forever and container
+        // creation wedges at OCI `status: created`. runc/crun bring `lo` up the
+        // same way (by the well-known loopback ifindex).
+        self.set_up(1)?;
         Ok(())
     }
 
@@ -383,15 +389,12 @@ mod tests {
     #[serial]
     fn test_bring_loopback_up_sets_lo_up() {
         let mut fake_client = FakeNetlinkClient::new();
-        // Response 1: get_by_name("lo") -> loopback at ifindex 1.
-        let mut lo = LinkMessage::default();
-        lo.header.index = 1;
-        lo.attributes.push(LinkAttribute::IfName("lo".to_string()));
-        // Response 2: set_up ACK.
-        fake_client.set_expected_responses(vec![
-            RouteNetlinkMessage::NewLink(lo),
-            RouteNetlinkMessage::NewLink(LinkMessage::default()),
-        ]);
+        // Only response needed: the set_up(1) ACK. bring_loopback_up no longer
+        // issues an RTM_GETLINK-by-name lookup — it sets `lo` (ifindex 1) up
+        // directly, avoiding the ACK-less GETLINK whose lost reply can wedge the
+        // recv forever.
+        fake_client
+            .set_expected_responses(vec![RouteNetlinkMessage::NewLink(LinkMessage::default())]);
 
         let mut link_client = LinkClient::new(ClientWrapper::Fake(fake_client)).unwrap();
         link_client
@@ -400,16 +403,16 @@ mod tests {
 
         if let ClientWrapper::Fake(fake_client) = &mut link_client.client {
             let send_calls = fake_client.get_send_calls();
-            // One GetLink (get_by_name "lo") + one SetLink (set_up).
-            assert_eq!(send_calls.len(), 2);
+            // Exactly one SetLink (set_up), no GetLink dump.
+            assert_eq!(send_calls.len(), 1);
             if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::SetLink(link)) =
-                &send_calls[1].payload
+                &send_calls[0].payload
             {
-                assert_eq!(link.header.index, 1, "set_up must target lo's ifindex");
+                assert_eq!(link.header.index, 1, "set_up must target lo's ifindex 1");
                 assert!(link.header.flags.contains(LinkFlags::Up));
                 assert!(link.header.change_mask.contains(LinkFlags::Up));
             } else {
-                panic!("Expected a SetLink message as the second netlink send");
+                panic!("Expected a SetLink message as the only netlink send");
             }
         } else {
             panic!("Expected Fake client");

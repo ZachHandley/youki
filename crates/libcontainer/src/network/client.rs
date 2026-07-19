@@ -1,3 +1,5 @@
+use std::os::unix::io::AsRawFd;
+
 use netlink_packet_core::NetlinkMessage;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::Socket;
@@ -23,6 +25,33 @@ impl NetlinkClient {
     pub fn new() -> Result<Self> {
         let mut socket = Socket::new(NETLINK_ROUTE)?;
         socket.bind_auto()?;
+        // Bound EVERY recv on this socket so an absent/lost netlink reply can
+        // never wedge the caller forever. `container_init_process` brings the
+        // container loopback `lo` up over this socket while ZLayer concurrently
+        // attaches the overlay veth to the same fresh netns; without a timeout
+        // the blocking `recv()` in `receive()`/`receive_multiple()` stalls in
+        // the kernel's `__skb_wait_for_more_packets` and the whole
+        // container-create deadlocks at OCI `status: created`. With SO_RCVTIMEO
+        // a stalled recv returns EAGAIN -> Err, which the best-effort caller
+        // (see `bring_loopback_up`) logs and steps past.
+        let timeout = libc::timeval {
+            tv_sec: 5,
+            tv_usec: 0,
+        };
+        // SAFETY: `socket` owns a valid open fd for the duration of this call and
+        // `&timeout` points to a live `timeval` of the length we pass.
+        let rc = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &timeout as *const libc::timeval as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(NetworkError::IO(std::io::Error::last_os_error()));
+        }
         Ok(Self { socket })
     }
 }
